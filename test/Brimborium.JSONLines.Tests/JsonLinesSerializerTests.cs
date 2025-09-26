@@ -2,16 +2,41 @@
 
 public class JsonLinesSerializerTests {
     [Test]
-    public async Task SerializeObject() {
+    public async Task SerializeToString() {
         List<TestData1> sut = new() {
             new (){ Name="a", Value=1},
             new (){ Name="2", Value=2}
         };
 
         JsonSerializerOptions options = new JsonSerializerOptions();
+        var act = System.Text.Json.JsonLinesSerializer.Serialize(sut, options);
+        await Assert.That(act).IsNotNull();
+        await Verify(act);
+    }
+
+    [Test]
+    public async Task DeserializeFromString() {
+        var input = """
+            {"Name":"a","Value":1}
+            {"Name":"2","Value":2}
+            """;
+        JsonSerializerOptions options = new JsonSerializerOptions();
+        List<TestData1> act = System.Text.Json.JsonLinesSerializer.Deserialize<TestData1>(input, options);
+        await Assert.That(act).IsNotNull();
+        await Assert.That(act.Count).IsEqualTo(2);
+        await Verify(act);
+    }
+
+    [Test]
+    public async Task SerializeAsync() {
+        List<TestData1> sut = new() {
+            new (){ Name="a", Value=1},
+            new (){ Name="2", Value=2}
+        };
 
         string act;
         using (MemoryStream stream = new MemoryStream()) {
+            JsonSerializerOptions options = new JsonSerializerOptions();
             System.Text.Json.JsonLinesSerializer.Serialize(stream, sut, options);
             stream.Position = 0;
             using (StreamReader sr = new(stream, System.Text.Encoding.UTF8)) { act = sr.ReadToEnd(); }
@@ -21,17 +46,17 @@ public class JsonLinesSerializerTests {
     }
 
     [Test]
-    public async Task DeserializeObject() {
+    public async Task DeserializeAsync() {
         var inputU8 = """
             {"Name":"a","Value":1}
             {"Name":"2","Value":2}
             """u8;
-        JsonSerializerOptions options = new JsonSerializerOptions();
 
         List<TestData1> act;
         using (MemoryStream stream = new MemoryStream()) {
             stream.Write(inputU8);
             stream.Position = 0;
+            JsonSerializerOptions options = new JsonSerializerOptions();
             act = System.Text.Json.JsonLinesSerializer.Deserialize<TestData1>(stream, options);
         }
         await Assert.That(act).IsNotNull();
@@ -60,7 +85,7 @@ public class JsonLinesSerializerTests {
         using (MemoryStream stream = new MemoryStream()) {
             System.Text.Json.JsonLinesSerializer.Serialize(stream, sut, options);
             stream.Position = 0;
-            using (var splitStream = new Brimborium.JSONLines.SplitStream(stream, false)) {
+            using (var splitStream = new Brimborium.JSONLines.SplitStream(stream, leaveOpen: true)) {
                 byte[] hack = new byte[100];
                 while (true) {
                     using (var splittedStream = splitStream.GetStream()) {
@@ -103,12 +128,12 @@ public class JsonLinesSerializerTests {
         var filename = System.IO.Path.GetTempFileName();
 
         List<TestData1> act;
-        using (System.IO.FileStream stream = new (filename, FileMode.Create)) {
-            await System.Text.Json.JsonLinesSerializer.SerializeAsync(stream, sut, options);
+        using (System.IO.FileStream stream = new(filename, FileMode.Create)) {
+            await System.Text.Json.JsonLinesSerializer.SerializeAsync(stream, sut, options, CancellationToken.None);
             await stream.FlushAsync();
             stream.Seek(0, SeekOrigin.Begin);
 
-            using (var splitStream = new Brimborium.JSONLines.SplitStream(stream, false)) {
+            using (var splitStream = new Brimborium.JSONLines.SplitStream(stream, leaveOpen: true)) {
                 byte[] hack = new byte[100];
                 while (true) {
                     using (var splittedStream = splitStream.GetStream()) {
@@ -125,7 +150,7 @@ public class JsonLinesSerializerTests {
             }
 
             stream.Seek(0, SeekOrigin.Begin);
-            act = await System.Text.Json.JsonLinesSerializer.DeserializeAsync<TestData1>(stream, options);
+            act = await System.Text.Json.JsonLinesSerializer.DeserializeAsync<TestData1>(stream, options, true, CancellationToken.None);
         }
         System.IO.File.Delete(filename);
         await Assert.That(act).IsNotNull();

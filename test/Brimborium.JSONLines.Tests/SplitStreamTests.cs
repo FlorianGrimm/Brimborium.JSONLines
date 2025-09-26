@@ -1,10 +1,11 @@
 ﻿namespace Brimborium.JSONLines.Tests;
+
 public class SplitStreamTests {
 
     [Test]
     public async Task SplitStreamOnlyOneLine() {
         using MemoryStream ms = new(new byte[] { 1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4 });
-        var splitStream = new SplitStream(ms, true, 4);
+        var splitStream = new SplitStream(ms, leaveOpen:true, chunkSize: 4);
         {
             byte[] buffer = new byte[4];
             using (var stream = splitStream.GetStream()) {
@@ -44,7 +45,7 @@ public class SplitStreamTests {
             21, 22, 23, 24, 21, 22, 23, 24, 13, 10,
             31, 32, 33, 34, 31, 32, 33, 34, 13, 10,
             41, 42, 43, 44, 41, 42, 43, 44, 13, 10, });
-        var splitStream = new SplitStream(ms, true, 4);
+        var splitStream = new SplitStream(ms, leaveOpen:true, chunkSize: 4);
         {
             byte[] buffer = new byte[400];
             using (var stream = splitStream.GetStream()) {
@@ -154,6 +155,37 @@ public class SplitStreamTests {
         {
             var stream = splitStream.GetStream();
             await Assert.That(stream).IsNull();
+        }
+    }
+
+    [Test]
+    public async Task SplitStreamDontReturnStartingWhiteSpaces() {
+        var input = """
+            1234
+              1234
+             1234
+            """u8;
+        using MemoryStream ms = new(input.ToArray());
+        var splitStream = new SplitStream(ms, leaveOpen:true, chunkSize: 4);
+        for(int i = 0; i < 4; i++) {
+            using (var stream = splitStream.GetStream()) {
+                if (stream == null) {
+                    break;
+                }
+                await Assert.That(i).IsLessThan(3);
+                byte[] buffer = new byte[400];
+                int countRead = 0;
+                while (true) {
+                    var read = stream!.Read(buffer, countRead, 400);
+                    if (read == 0) {
+                        break;
+                    } else {
+                        countRead += read;
+                    }
+                }
+                await Assert.That(countRead).IsEquivalentTo(4);
+                await Assert.That(buffer.Take(4)).IsEquivalentTo("1234"u8.ToArray());
+            }
         }
     }
 }
