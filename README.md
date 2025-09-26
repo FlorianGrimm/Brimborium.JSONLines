@@ -27,22 +27,37 @@ var json = System.Text.Json.JsonLinesSerializer.Serialize(sut, options);
     List<TestData1> act = System.Text.Json.JsonLinesSerializer.Deserialize<TestData1>(input, options);
 ```
 
-## https://jsonlines.org/
+## Definition
 
-The JSON Lines format has three requirements:
+Almost https://jsonlines.org/
 
 1. UTF-8 Encoding
-
 2. Each Line is a Valid JSON Value
-
 3. Line Terminator is '\n'
-This means '\r\n' is also supported because surrounding white space is implicitly ignored when parsing JSON values.
+4. empty lines are ignored.
+5. null as the value of the line will be ignored. If you need this change it - it's only 2 if-s.
 
-## Implementation
+## Status
+
+The implementation is alpha - not really battle tested.
+
+# Implementation explained 
 
 The System.Text.Json lower writer / reader cannot be persuaded to do that.
 
-So the Brimborium.JSONLines.SplitStream split the given stream. 
-The System.Text.Json.JsonSerializer.Deserialize<T> will be called as long as there are splits.
+So the Brimborium.JSONLines.SplitStream split the given stream into a stream contaning only one line.
+Calling MoveNextStream() will continue with the next line. This saves GC.
+The System.Text.Json.JsonSerializer.Deserialize<T> will be called foreach line.
 
-M
+## License
+
+MIT + Before you use any part of the code you must review it and add tests.
+
+# Security
+
+The code does not directly use IO - only indirect through the given stream.
+The code uses System.Text.Json - please ensure you use a good version.
+
+
+Happy Coding
+flori
