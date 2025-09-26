@@ -15,15 +15,32 @@ public sealed class SplitStream : Stream {
 
     // the size of the private buffer - it's 4 times the chunk size
     private readonly int _BufferSize;
+
+    // the private buffer - will be cleared when the stream is disposed
     private readonly byte[] _Buffer;
+
+    // the giveninner stream
     private Stream? _InnerStream;
+
+    // leave the stream open after disposing this instance
     private bool _LeaveOpen;
 
+    // the position in the buffer where the next read should start
     private int _BufferStart;
+
+    // the number of bytes in the buffer
     private int _BufferLength;
+
+    // the length of the line in the buffer or -1 if there is no newline in the buffer.
     private int _LengthNewLine;
+
+    // true if the end of the line is read from the inner stream - but there could be content in the buffer
     private bool _EndOfSplit;
+
+    // true if the end of the stream is reached - but there could be content in the buffer
     private bool _EndOfStream;
+
+    // true if the next line is ready to read; false MoveNextStream has not been called yet.
     private bool _ReadyToRead;
 
     /// <summary>
@@ -46,6 +63,7 @@ public sealed class SplitStream : Stream {
         this._ReadyToRead = false;
     }
 
+    /// <inheritdoc/>
     public override void Close() {
         if (this._LeaveOpen) {
             this._InnerStream = null;
@@ -54,14 +72,14 @@ public sealed class SplitStream : Stream {
                 this._InnerStream = null;
             }
         }
+        Array.Clear(this._Buffer);
         base.Close();
     }
 
     /// <summary>
-    /// Get the next stream or null if there is no more data.
+    /// Check if there is a next stream.
     /// </summary>
-    /// <returns>the next stream or null if there is no more data.</returns>
-    /// <exception cref="InvalidOperationException">if the previous stream is not closed yet.</exception>
+    /// <returns>true if there is a next stream.</returns>
     public bool MoveNextStream() {
         if (this._InnerStream is { } stream) {
             this._EndOfSplit = false;
@@ -73,10 +91,9 @@ public sealed class SplitStream : Stream {
     }
 
     /// <summary>
-    /// Get the next stream or null if there is no more data.
+    /// Check if there is a next stream.
     /// </summary>
-    /// <returns>the next stream or null if there is no more data.</returns>
-    /// <exception cref="InvalidOperationException">if the previous stream is not closed yet.</exception>
+    /// <returns>true if there is a next stream.</returns>
     public async ValueTask<bool> MoveNextStreamAsync(CancellationToken cancellationToken) {
         if (this._InnerStream is { } stream) {
             this._EndOfSplit = false;
@@ -91,8 +108,6 @@ public sealed class SplitStream : Stream {
     /// Load the first line into the buffer. 
     /// or use the last loaded conent also respecting the newline
     /// </summary>
-    /// <param name="stream"></param>
-    /// <returns></returns>
     private bool Prefetch() {
         if (this._InnerStream is null) { return false; }
 
@@ -126,6 +141,10 @@ public sealed class SplitStream : Stream {
         }
     }
 
+    /// <summary>
+    /// Load the first line into the buffer. 
+    /// or use the last loaded conent also respecting the newline
+    /// </summary>
     private async ValueTask<bool> PrefetchAsync(CancellationToken cancellationToken) {
         if (this._InnerStream is null) { return false; }
 
@@ -159,6 +178,7 @@ public sealed class SplitStream : Stream {
         }
     }
 
+    // Stream
     public override bool CanRead => true;
 
     public override bool CanSeek => false;
@@ -293,6 +313,8 @@ public sealed class SplitStream : Stream {
         }
     }
 
+    // Stream
+
     public override long Seek(long offset, SeekOrigin origin) {
         throw new NotSupportedException();
     }
@@ -305,8 +327,11 @@ public sealed class SplitStream : Stream {
         throw new NotSupportedException();
     }
 
+    // Helpers
+
     private bool IsEnabledLengthNewLine => (0 <= this._LengthNewLine);
 
+    // TrimStart at _BufferStart
     private bool SkipWhitespace() {
         if (0 < this._BufferLength) {
             var diff = this._BufferLength - this._Buffer.AsSpan(this._BufferStart, this._BufferLength).TrimStart(ArrWhiteSpace).Length;
@@ -319,6 +344,7 @@ public sealed class SplitStream : Stream {
         return false;
     }
 
+    // move the buffer start to the right
     private void AdvanceBuffer(int diff) {
         if (this._BufferLength == diff) {
             this._BufferLength = 0;

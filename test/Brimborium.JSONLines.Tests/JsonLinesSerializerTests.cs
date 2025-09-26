@@ -28,6 +28,41 @@ public class JsonLinesSerializerTests {
     }
 
     [Test]
+    public async Task SerializeToStringWithWriteIndented() {
+        List<TestData1> sut = new() {
+            new (){ Name="a", Value=1},
+            new (){ Name="2", Value=2},
+            new (){ Name="d\r\ne", Value=3},
+        };
+
+        JsonSerializerOptions options = new ();
+        options.WriteIndented = true;
+        var act = System.Text.Json.JsonLinesSerializer.Serialize(sut, options);
+        await Assert.That(act).IsNotNull();
+        await Verify(act);
+    }
+
+
+
+    [Test]
+    public async Task DeserializeFromStringWithEmptylines() {
+        var input = """
+            {"Name":"a","Value":1}
+            {"Name":"2","Value":2}
+
+            {"Name":"d\r\ne","Value":3}
+
+            null
+
+            """;
+        JsonSerializerOptions options = new JsonSerializerOptions();
+        List<TestData1> act = System.Text.Json.JsonLinesSerializer.Deserialize<TestData1>(input, options);
+        await Assert.That(act).IsNotNull();
+        await Assert.That(act.Count).IsEqualTo(3);
+        await Verify(act);
+    }
+
+    [Test]
     public async Task SerializeAsync() {
         List<TestData1> sut = new() {
             new (){ Name="a", Value=1},
