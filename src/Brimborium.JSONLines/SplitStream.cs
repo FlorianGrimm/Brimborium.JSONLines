@@ -1,21 +1,30 @@
-﻿#pragma warning disable IDE0057 // Use range operator
+﻿#pragma warning disable IDE0063 // Use simple 'using' statement
+#pragma warning disable IDE0057 // Use range operator
 
 namespace Brimborium.JSONLines;
 
 /// <summary>
 /// Split a stream into multiple streams by newline.
 /// </summary>
-public sealed class SplitStream : IDisposable {
+public sealed class SplitStream : Stream {
+    private static byte[] ArrWhiteSpace = new byte[] { 9, 10, 13, 32 };
+    private static byte[] ArrNewLines = new byte[] { 10, 13 };
+
     // the size of bytes to read from the stream at once
     private readonly int _ChunkSize;
 
-    // the size of the internal buffer - it's 4 times the chunk size
+    // the size of the private buffer - it's 4 times the chunk size
     private readonly int _BufferSize;
-
-    private Stream? _Stream;
+    private readonly byte[] _Buffer;
+    private Stream? _InnerStream;
     private bool _LeaveOpen;
-    private readonly State _State;
-    private InnerStream? _ActiveInnerStream;
+
+    private int _BufferStart;
+    private int _BufferLength;
+    private int _LengthNewLine;
+    private bool _EndOfSplit;
+    private bool _EndOfStream;
+    private bool _ReadyToRead;
 
     /// <summary>
     /// create a new instance.
@@ -26,21 +35,40 @@ public sealed class SplitStream : IDisposable {
     public SplitStream(Stream stream, bool leaveOpen = true, int chunkSize = 0) {
         if (chunkSize <= 0) { this._ChunkSize = 1024 * 16; } else { this._ChunkSize = chunkSize; }
         this._BufferSize = this._ChunkSize * 4;
-
-        this._Stream = stream;
+        this._Buffer = new byte[this._BufferSize];
+        this._InnerStream = stream;
         this._LeaveOpen = leaveOpen;
-        State state = new(this._ChunkSize, this._BufferSize);
-        this._State = state;
+        this._BufferStart = 0;
+        this._BufferLength = 0;
+        this._LengthNewLine = -1;
+        this._EndOfSplit = false;
+        this._EndOfStream = false;
+        this._ReadyToRead = false;
     }
 
-    /// <inheritdoc/>
-    public void Dispose() {
+    public override void Close() {
         if (this._LeaveOpen) {
-            this._Stream = null;
+            this._InnerStream = null;
         } else {
-            using (var stream = this._Stream) {
-                this._Stream = null;
+            using (var stream = this._InnerStream) {
+                this._InnerStream = null;
             }
+        }
+        base.Close();
+    }
+
+    /// <summary>
+    /// Get the next stream or null if there is no more data.
+    /// </summary>
+    /// <returns>the next stream or null if there is no more data.</returns>
+    /// <exception cref="InvalidOperationException">if the previous stream is not closed yet.</exception>
+    public bool MoveNextStream() {
+        if (this._InnerStream is { } stream) {
+            this._EndOfSplit = false;
+            this._ReadyToRead = this.Prefetch();
+            return _ReadyToRead;
+        } else {
+            return false;
         }
     }
 
@@ -49,42 +77,13 @@ public sealed class SplitStream : IDisposable {
     /// </summary>
     /// <returns>the next stream or null if there is no more data.</returns>
     /// <exception cref="InvalidOperationException">if the previous stream is not closed yet.</exception>
-    public Stream? GetStream() {
-        if (this._Stream is { } stream) {
-            if (this._ActiveInnerStream is { }) {
-                throw new InvalidOperationException("The previous stream is not closed yet.");
-            }
-            if (this.Prefetch()) {
-                var inner = new InnerStream(this, this._State, stream);
-                this._ActiveInnerStream = inner;
-                return inner;
-            } else {
-                return null;
-            }
+    public async ValueTask<bool> MoveNextStreamAsync(CancellationToken cancellationToken) {
+        if (this._InnerStream is { } stream) {
+            this._EndOfSplit = false;
+            this._ReadyToRead = (await this.PrefetchAsync(cancellationToken).ConfigureAwait(false));
+            return this._ReadyToRead;
         } else {
-            return null;
-        }
-    }
-
-    /// <summary>
-    /// Get the next stream or null if there is no more data.
-    /// </summary>
-    /// <returns>the next stream or null if there is no more data.</returns>
-    /// <exception cref="InvalidOperationException">if the previous stream is not closed yet.</exception>
-    public async ValueTask<Stream?> GetStreamAsync(CancellationToken cancellationToken) {
-        if (this._Stream is { } stream) {
-            if (this._ActiveInnerStream is { }) {
-                throw new InvalidOperationException("The previous stream is not closed yet.");
-            }
-            if (await this.PrefetchAsync(cancellationToken)) {
-                var inner = new InnerStream(this, this._State, stream);
-                this._ActiveInnerStream = inner;
-                return inner;
-            } else {
-                return null;
-            }
-        } else {
-            return null;
+            return false;
         }
     }
 
@@ -94,370 +93,341 @@ public sealed class SplitStream : IDisposable {
     /// </summary>
     /// <param name="stream"></param>
     /// <returns></returns>
-    internal bool Prefetch() {
-        if (this._Stream is not { } stream) { return false; }
+    private bool Prefetch() {
+        if (this._InnerStream is null) { return false; }
 
-        if (0 <= this._State.LengthNewLine) {
-            this._State.SkipWhitespace();
+        if (0 <= this._LengthNewLine) {
+            this.SkipWhitespace();
         }
 
-        if (this._State.BufferLength == 0) {
-            this._State.Read(stream, this._State.ChunkSize);
-            if (this._State.EndOfStream) { return false; }
+        if (this._BufferLength == 0) {
+            this.InnerRead(this._ChunkSize);
+            if (this._EndOfStream) { return false; }
         }
 
-        while (0 <= this._State.BufferLength) {
-            this._State.SkipWhitespace();
+        while (0 <= this._BufferLength) {
+            this.SkipWhitespace();
 
-            if (0 < this._State.BufferLength) {
-                this._State.FindNextBufferEOFPosition();
+            if (0 < this._BufferLength) {
+                // SkipWhitespace has eaten all heading whitespace, 
+                // then there is content (0 < this._BufferLength) 
+                // and there could be a newline in the buffer.
+                this.FindNextBufferEOFPosition();
                 return true;
             } else {
-                this._State.Read(stream, this._State.ChunkSize);
-                if (this._State.EndOfStream) { return false; }
+                this.InnerRead(this._ChunkSize);
+                if (this._EndOfStream) { return false; }
             }
         }
 
         {
-            this._State.Read(stream, this._State.ChunkSize);
-            return (0 < this._State.BufferLength);
+            this.InnerRead(this._ChunkSize);
+            return (0 < this._BufferLength);
         }
     }
 
-    internal async ValueTask<bool> PrefetchAsync(CancellationToken cancellationToken) {
-        if (this._Stream is not { } stream) { return false; }
+    private async ValueTask<bool> PrefetchAsync(CancellationToken cancellationToken) {
+        if (this._InnerStream is null) { return false; }
 
-        if (0 <= this._State.LengthNewLine) {
-            this._State.SkipWhitespace();
+        if (0 <= this._LengthNewLine) {
+            this.SkipWhitespace();
         }
 
-        if (this._State.BufferLength == 0) {
-            this._State.Read(stream, this._State.ChunkSize);
-            if (this._State.EndOfStream) { return false; }
+        if (this._BufferLength == 0) {
+            await this.InnerReadAsync(this._ChunkSize, cancellationToken);
+            if (this._EndOfStream) { return false; }
         }
 
-        while (0 <= this._State.BufferLength) {
-            this._State.SkipWhitespace();
+        while (0 <= this._BufferLength) {
+            this.SkipWhitespace();
 
-            if (0 < this._State.BufferLength) {
-                this._State.FindNextBufferEOFPosition();
+            if (0 < this._BufferLength) {
+                // SkipWhitespace has eaten all heading whitespace, 
+                // then there is content (0 < this._BufferLength) 
+                // and there could be a newline in the buffer.
+                this.FindNextBufferEOFPosition();
                 return true;
             } else {
-                await this._State.ReadAsync(stream, this._State.ChunkSize, cancellationToken);
-                if (this._State.EndOfStream) { return false; }
+                await this.InnerReadAsync(this._ChunkSize, cancellationToken);
+                if (this._EndOfStream) { return false; }
             }
         }
 
         {
-            await this._State.ReadAsync(stream, this._State.ChunkSize, cancellationToken);
-            return (0 < this._State.BufferLength);
+            await this.InnerReadAsync(this._ChunkSize, cancellationToken);
+            return (0 < this._BufferLength);
         }
     }
 
+    public override bool CanRead => true;
 
-    internal sealed class State {
-        public readonly int ChunkSize;
-        public readonly int BufferSize;
-        public readonly byte[] Buffer;
-        public int BufferStart;
-        public int BufferLength;
-        public bool EndOfStream;
-        public int LengthNewLine;
+    public override bool CanSeek => false;
 
-        public State(int chunkSize, int bufferSize) {
-            this.ChunkSize = chunkSize;
-            this.BufferSize = bufferSize;
-            this.Buffer = new byte[bufferSize];
-            this.BufferStart = 0;
-            this.BufferLength = 0;
-            this.LengthNewLine = -1;
+    public override bool CanWrite => false;
+
+    public override long Length => -1;
+
+    public override long Position {
+        get => -1;
+        set { throw new NotSupportedException(); }
+    }
+
+    public override void Flush() { throw new NotSupportedException(); }
+
+
+    public override int Read(Span<byte> buffer) {
+        if (!this._ReadyToRead) { return 0; }
+        if ((0 == this._BufferLength) && (this._EndOfSplit)) { return 0; }
+
+        if (0 == this._LengthNewLine) {
+            if (this.SkipWhitespace()) {
+                this._LengthNewLine = -1;
+            }
+            return 0;
+        } else if (0 < this._LengthNewLine) {
+            return this.Copy(buffer);
         }
 
-        public bool IsEnabledLengthNewLine => (0 <= this.LengthNewLine);
+        if (this._EndOfStream) {
+            if (this._BufferLength == 0) {
+                return 0;
+            } else {
+                return this.Copy(buffer);
+            }
+        }
 
-        private static byte[] ArrWhiteSpace = new byte[] { 9, 10, 13, 32 };
+        if (this._ChunkSize < buffer.Length) { buffer = buffer.Slice(0, this._ChunkSize); }
 
-        public bool SkipWhitespace() {
-            if (0 < this.BufferLength) {
-                var diff = this.BufferLength - this.Buffer.AsSpan(this.BufferStart, this.BufferLength).TrimStart(ArrWhiteSpace).Length;
-                if (0 < diff) {
-                    this.LengthNewLine = -1;
-                    this.AdvanceBuffer(diff);
-                    return true;
+        {
+            if (buffer.Length < this._BufferLength) {
+            } else if (this._BufferLength < this._ChunkSize) {
+                if (0 < this._BufferLength
+                    && this._ChunkSize * 3 < this._BufferStart + this._BufferLength) {
+                    buffer = buffer.Slice(0, this._BufferLength);
+                } else {
+                    this.InnerRead(buffer.Length);
+                    if (0 <= this._LengthNewLine) {
+                        if (this._LengthNewLine < buffer.Length) {
+                            buffer = buffer.Slice(0, this._LengthNewLine);
+                        }
+                        if (!this._EndOfSplit) {
+                            this._EndOfSplit = true;
+                        }
+                    }
+                    if (!this._EndOfSplit && this._EndOfStream) {
+                        this._EndOfSplit = true;
+                    }
                 }
             }
+        }
+
+        return this.Copy(buffer);
+    }
+
+    public override int Read(byte[] buffer, int offset, int count) {
+        if (!this._ReadyToRead) { return 0; }
+        if (buffer.Length < (offset + count)) {
+            return this.Read(buffer.AsSpan(offset));
+        } else {
+            return this.Read(buffer.AsSpan(offset, count));
+        }
+    }
+
+
+    public async override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) {
+        if (!this._ReadyToRead) { return 0; }
+        if ((0 == this._BufferLength) && (this._EndOfSplit)) { return 0; }
+
+        if (0 == this._LengthNewLine) {
+            if (this.SkipWhitespace()) {
+                this._LengthNewLine = -1;
+            }
+            return 0;
+        } else if (0 < this._LengthNewLine) {
+            return this.Copy(buffer.Span);
+        }
+
+        if (this._EndOfStream) {
+            if (this._BufferLength == 0) {
+                return 0;
+            } else {
+                return this.Copy(buffer.Span);
+            }
+        }
+
+        if (this._ChunkSize < buffer.Length) { buffer = buffer.Slice(0, this._ChunkSize); }
+
+        {
+            if (buffer.Length < this._BufferLength) {
+            } else if (this._BufferLength < this._ChunkSize) {
+                if (0 < this._BufferLength
+                    && this._ChunkSize * 3 < this._BufferStart + this._BufferLength) {
+                    buffer = buffer.Slice(0, this._BufferLength);
+                } else {
+                    await this.InnerReadAsync(buffer.Length, cancellationToken);
+                    if (0 <= this._LengthNewLine) {
+                        if (this._LengthNewLine < buffer.Length) {
+                            buffer = buffer.Slice(0, this._LengthNewLine);
+                        }
+                        if (!this._EndOfSplit) {
+                            this._EndOfSplit = true;
+                        }
+                    }
+                    if (!this._EndOfSplit && this._EndOfStream) {
+                        this._EndOfSplit = true;
+                    }
+                }
+            }
+        }
+
+        return this.Copy(buffer.Span);
+    }
+
+    public override async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) {
+        if (!this._ReadyToRead) { return 0; }
+
+        if (buffer.Length < (offset + count)) {
+            return await this.ReadAsync(buffer.AsMemory(offset), cancellationToken);
+        } else {
+            return await this.ReadAsync(buffer.AsMemory(offset, count), cancellationToken);
+        }
+    }
+
+    public override long Seek(long offset, SeekOrigin origin) {
+        throw new NotSupportedException();
+    }
+
+    public override void SetLength(long value) {
+        throw new NotSupportedException();
+    }
+
+    public override void Write(byte[] buffer, int offset, int count) {
+        throw new NotSupportedException();
+    }
+
+    private bool IsEnabledLengthNewLine => (0 <= this._LengthNewLine);
+
+    private bool SkipWhitespace() {
+        if (0 < this._BufferLength) {
+            var diff = this._BufferLength - this._Buffer.AsSpan(this._BufferStart, this._BufferLength).TrimStart(ArrWhiteSpace).Length;
+            if (0 < diff) {
+                this._LengthNewLine = -1;
+                this.AdvanceBuffer(diff);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void AdvanceBuffer(int diff) {
+        if (this._BufferLength == diff) {
+            this._BufferLength = 0;
+            this._BufferStart = 0;
+            if (this.IsEnabledLengthNewLine) {
+                this._LengthNewLine -= diff;
+            }
+        } else if (this._BufferLength < diff) {
+            throw new ArgumentOutOfRangeException();
+        } else {
+            this._BufferLength -= diff;
+            this._BufferStart += diff;
+            if (this.IsEnabledLengthNewLine) {
+                this._LengthNewLine -= diff;
+            }
+        }
+    }
+
+    private void InnerRead(int count) {
+        if (this._InnerStream is not { } stream) { return; }
+
+        if (this.IsEnabledLengthNewLine) {
+            throw new Exception("0 <= this._BufferLengthEOF");
+        }
+        if (this._EndOfStream) { return; }
+
+        // target position within the buffer
+        int bufferEnd = this._BufferStart + this._BufferLength;
+
+        // if the tail space is low eat the buffer
+        if (0 < this._BufferLength && this._ChunkSize * 3 < bufferEnd) {
+            return;
+        }
+
+        if (this._BufferSize < bufferEnd + count) {
+            count = this._BufferSize - bufferEnd;
+        }
+
+        int read = stream.Read(this._Buffer, bufferEnd, count);
+        this.PostRead(read);
+
+    }
+
+    private async ValueTask InnerReadAsync(int count, CancellationToken cancellationToken) {
+        if (this._InnerStream is not { } stream) { return; }
+
+        if (this.IsEnabledLengthNewLine) {
+            throw new Exception("0 <= this._BufferLengthEOF");
+        }
+        if (this._EndOfStream) { return; }
+
+        // target position within the buffer
+        int bufferEnd = this._BufferStart + this._BufferLength;
+
+        // if the tail space is low eat the buffer
+        if (0 < this._BufferLength && this._ChunkSize * 3 < bufferEnd) {
+            return;
+        }
+
+        if (this._BufferSize < bufferEnd + count) {
+            count = this._BufferSize - bufferEnd;
+        }
+
+        int read = await stream.ReadAsync(this._Buffer.AsMemory().Slice(bufferEnd, count), cancellationToken);
+        this.PostRead(read);
+    }
+
+    private void PostRead(int read) {
+        if (read == 0) {
+            this._EndOfStream = true;
+        } else {
+            this._BufferLength += read;
+            this.FindNextBufferEOFPosition();
+        }
+    }
+
+    private bool FindNextBufferEOFPosition() {
+        int diff = this._Buffer.AsSpan(this._BufferStart, this._BufferLength).IndexOfAny(ArrNewLines);
+        if (0 <= diff) {
+            this._LengthNewLine = diff;
+            return true;
+        } else {
             return false;
         }
-
-        public void AdvanceBuffer(int diff) {
-            if (this.BufferLength == diff) {
-                this.BufferLength = 0;
-                this.BufferStart = 0;
-                if (this.IsEnabledLengthNewLine) {
-                    this.LengthNewLine -= diff;
-                }
-            } else if (this.BufferLength < diff) {
-                throw new ArgumentOutOfRangeException();
-            } else {
-                this.BufferLength -= diff;
-                this.BufferStart += diff;
-                if (this.IsEnabledLengthNewLine) {
-                    this.LengthNewLine -= diff;
-                }
-            }
-        }
-
-        public void Read(Stream stream, int count) {
-            if (this.IsEnabledLengthNewLine) {
-                throw new Exception("0 <= this.BufferLengthEOF");
-            }
-            if (this.EndOfStream) { return; }
-
-            // target position within the buffer
-            int bufferEnd = this.BufferStart + this.BufferLength;
-
-            // if the tail space is low copy it to the front
-            // rare / panic
-            if (this.ChunkSize * 3 < bufferEnd) {
-                Array.Copy(this.Buffer, bufferEnd, this.Buffer, 0, this.BufferLength);
-                this.BufferStart = 0;
-                bufferEnd = this.BufferLength;
-            }
-
-            if (this.BufferSize < bufferEnd + count) {
-                count = this.BufferSize - bufferEnd;
-            }
-
-            int read = stream.Read(this.Buffer, bufferEnd, count);
-            this.PostRead(read);
-
-        }
-
-        public async ValueTask ReadAsync(Stream stream, int count, CancellationToken cancellationToken) {
-            if (this.IsEnabledLengthNewLine) {
-                throw new Exception("0 <= this.BufferLengthEOF");
-            }
-            if (this.EndOfStream) { return; }
-
-            // target position within the buffer
-            int bufferEnd = this.BufferStart + this.BufferLength;
-
-            // if the tail space is low copy it to the front
-            // rare / panic
-            if (this.ChunkSize * 3 < bufferEnd) {
-                Array.Copy(this.Buffer, bufferEnd, this.Buffer, 0, this.BufferLength);
-                this.BufferStart = 0;
-                bufferEnd = this.BufferLength;
-            }
-
-            if (this.BufferSize < bufferEnd + count) {
-                count = this.BufferSize - bufferEnd;
-            }
-
-            int read = await stream.ReadAsync(this.Buffer.AsMemory().Slice(bufferEnd, count), cancellationToken);
-            this.PostRead(read);
-        }
-
-        private void PostRead(int read) {
-            if (read == 0) {
-                this.EndOfStream = true;
-            } else {
-                this.BufferLength += read;
-                this.FindNextBufferEOFPosition();
-            }
-        }
-
-        public bool FindNextBufferEOFPosition() {
-            int diff = this.Buffer.AsSpan(this.BufferStart, this.BufferLength).IndexOfAny(ArrNewLines);
-            if (0 <= diff) {
-                this.LengthNewLine = diff;
-                return true;
-            } else {
-                return false;
-            }
-        }
-
-        public static byte[] ArrNewLines = new byte[] { 10, 13 };
-
-        public int Copy(Span<byte> buffer) {
-            int result = buffer.Length;
-            if (this.IsEnabledLengthNewLine) {
-                if (this.LengthNewLine < result) {
-                    result = this.LengthNewLine;
-                }
-            }
-
-            if (this.BufferLength < result) {
-                result = this.BufferLength;
-            }
-
-            if (result == 0) {
-                return 0;
-            }
-            this.Buffer.AsSpan(this.BufferStart, result).CopyTo(buffer);
-
-            this.AdvanceBuffer(result);
-
-            return result;
-        }
     }
 
-    internal class InnerStream : Stream {
-        private readonly SplitStream _SplitStream;
-        private readonly State _State;
-        private readonly Stream _Stream;
-        private bool _EndOfSplit;
-
-        public InnerStream(SplitStream splitStream, State state, Stream stream) {
-            this._SplitStream = splitStream;
-            this._State = state;
-            this._Stream = stream;
-            this._EndOfSplit = this._State.IsEnabledLengthNewLine;
-        }
-
-        public override void Close() {
-            this._SplitStream._ActiveInnerStream = null;
-            base.Close();
-        }
-
-        public override bool CanRead => true;
-
-        public override bool CanSeek => false;
-
-        public override bool CanWrite => false;
-
-        public override long Length => -1;
-
-        public override long Position {
-            get => -1;
-            set { throw new NotSupportedException(); }
-        }
-
-        public override void Flush() { throw new NotSupportedException(); }
-
-        public override int Read(Span<byte> buffer) {
-            if ((0 == this._State.BufferLength) && (this._EndOfSplit)) { return 0; }
-
-            if (0 == this._State.LengthNewLine) {
-                if (this._State.SkipWhitespace()) {
-                    this._State.LengthNewLine = -1;
-                }
-                return 0;
-            } else if (0 < this._State.LengthNewLine) {
-                return this._State.Copy(buffer);
-            }
-
-            if (this._State.EndOfStream) {
-                if (this._State.BufferLength == 0) {
-                    return 0;
-                } else {
-                    return this._State.Copy(buffer);
-                }
-            }
-
-            if (this._State.ChunkSize < buffer.Length) { buffer = buffer.Slice(0, this._State.ChunkSize); }
-
-            {
-                if (buffer.Length < this._State.BufferLength) {
-                } else if (this._State.BufferLength < this._State.ChunkSize) {
-                    if (0 < this._State.BufferLength
-                        && this._State.ChunkSize * 3 < this._State.BufferStart + this._State.BufferLength) {
-                        buffer = buffer.Slice(0, this._State.BufferLength);
-                    } else {
-                        this._State.Read(this._Stream, buffer.Length);
-                        if (0 <= this._State.LengthNewLine) {
-                            if (this._State.LengthNewLine < buffer.Length) {
-                                buffer = buffer.Slice(0, this._State.LengthNewLine);
-                            }
-                            if (!this._EndOfSplit) {
-                                this._EndOfSplit = true;
-                            }
-                        }
-                        if (!this._EndOfSplit && this._State.EndOfStream) {
-                            this._EndOfSplit = true;
-                        }
-                    }
-                }
-            }
-
-            return this._State.Copy(buffer);
-        }
-
-        public override int Read(byte[] buffer, int offset, int count) {
-            if (buffer.Length < (offset + count)) {
-                return this.Read(buffer.AsSpan(offset));
-            } else {
-                return this.Read(buffer.AsSpan(offset, count));
+    private int Copy(Span<byte> buffer) {
+        int result = buffer.Length;
+        if (this.IsEnabledLengthNewLine) {
+            if (this._LengthNewLine < result) {
+                result = this._LengthNewLine;
             }
         }
 
-        public async override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) {
-
-            if ((0 == this._State.BufferLength) && (this._EndOfSplit)) { return 0; }
-
-            if (0 == this._State.LengthNewLine) {
-                if (this._State.SkipWhitespace()) {
-                    this._State.LengthNewLine = -1;
-                }
-                return 0;
-            } else if (0 < this._State.LengthNewLine) {
-                return this._State.Copy(buffer.Span);
-            }
-
-            if (this._State.EndOfStream) {
-                if (this._State.BufferLength == 0) {
-                    return 0;
-                } else {
-                    return this._State.Copy(buffer.Span);
-                }
-            }
-
-            if (this._State.ChunkSize < buffer.Length) { buffer = buffer.Slice(0, this._State.ChunkSize); }
-
-            {
-                if (buffer.Length < this._State.BufferLength) {
-                } else if (this._State.BufferLength < this._State.ChunkSize) {
-                    if (0 < this._State.BufferLength
-                        && this._State.ChunkSize * 3 < this._State.BufferStart + this._State.BufferLength) {
-                        buffer = buffer.Slice(0, this._State.BufferLength);
-                    } else {
-                        await this._State.ReadAsync(this._Stream, buffer.Length, cancellationToken);
-                        if (0 <= this._State.LengthNewLine) {
-                            if (this._State.LengthNewLine < buffer.Length) {
-                                buffer = buffer.Slice(0, this._State.LengthNewLine);
-                            }
-                            if (!this._EndOfSplit) {
-                                this._EndOfSplit = true;
-                            }
-                        }
-                        if (!this._EndOfSplit && this._State.EndOfStream) {
-                            this._EndOfSplit = true;
-                        }
-                    }
-                }
-            }
-
-            return this._State.Copy(buffer.Span);
+        if (this._BufferLength < result) {
+            result = this._BufferLength;
         }
 
-        public override async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) {
-            if (buffer.Length < (offset + count)) {
-                return await this.ReadAsync(buffer.AsMemory(offset), cancellationToken);
-            } else {
-                return await this.ReadAsync(buffer.AsMemory(offset, count), cancellationToken);
-            }
+        if (result == 0) {
+            return 0;
+        }
+        this._Buffer.AsSpan(this._BufferStart, result).CopyTo(buffer);
+
+        this.AdvanceBuffer(result);
+
+        if (this._EndOfSplit && (0 == this._BufferLength || 0 == this._LengthNewLine)) {
+            this._ReadyToRead = false;
         }
 
-        public override long Seek(long offset, SeekOrigin origin) {
-            throw new NotSupportedException();
-        }
-
-        public override void SetLength(long value) {
-            throw new NotSupportedException();
-        }
-
-        public override void Write(byte[] buffer, int offset, int count) {
-            throw new NotSupportedException();
-        }
+        return result;
     }
 }

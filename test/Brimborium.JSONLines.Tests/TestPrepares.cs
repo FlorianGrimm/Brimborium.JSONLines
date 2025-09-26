@@ -1,5 +1,4 @@
 ﻿[assembly: System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
-[assembly: NotInParallel()]
 
 namespace Brimborium.JSONLines.Tests;
 

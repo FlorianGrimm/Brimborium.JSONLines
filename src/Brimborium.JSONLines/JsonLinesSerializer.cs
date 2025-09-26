@@ -75,17 +75,11 @@ public static class JsonLinesSerializer {
         bool leaveOpen = true) {
         var result = new List<T>();
         using (var splitStream = new Brimborium.JSONLines.SplitStream(utf8Json, leaveOpen)) {
-            while (true) {
-                using (var splittedStream = splitStream.GetStream()) {
-                    if (splittedStream is { }) {
-                        T? item = System.Text.Json.JsonSerializer.Deserialize<T>(splittedStream, options);
-                        if (item is { }) {
-                            result.Add(item);
-                        }
-                    } else {
-                        break;
-                    }
-                }
+            while (splitStream.MoveNextStream()) {
+                T? item = System.Text.Json.JsonSerializer.Deserialize<T>(splitStream, options);
+                if (item is { }) {
+                    result.Add(item);
+                }                
             }
         }
         return result;
@@ -131,16 +125,10 @@ public static class JsonLinesSerializer {
         where T : notnull {
         var result = new List<T>();
         using (var splitStream = new Brimborium.JSONLines.SplitStream(utf8Json, leaveOpen)) {
-            while (true) {
-                using (var splittedStream = splitStream.GetStream()) {
-                    if (splittedStream is { }) {
-                        T? item = await System.Text.Json.JsonSerializer.DeserializeAsync<T>(splittedStream, options, cancellationToken);
-                        if (item is { }) {
-                            result.Add(item);
-                        }
-                    } else {
-                        break;
-                    }
+            while (splitStream.MoveNextStream()) {                
+                T? item = await System.Text.Json.JsonSerializer.DeserializeAsync<T>(splitStream, options, cancellationToken);
+                if (item is { }) {
+                    result.Add(item);
                 }
             }
         }

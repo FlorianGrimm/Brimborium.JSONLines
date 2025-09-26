@@ -5,24 +5,29 @@ public class SplitStreamTests {
     [Test]
     public async Task SplitStreamOnlyOneLine() {
         using MemoryStream ms = new(new byte[] { 1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4 });
-        var splitStream = new SplitStream(ms, leaveOpen:true, chunkSize: 4);
+        using var splitStream = new SplitStream(ms, leaveOpen: true, chunkSize: 4);
         {
-            byte[] buffer = new byte[4];
-            using (var stream = splitStream.GetStream()) {
-                await Assert.That(stream).IsNotNull();
-                for (int i = 0; i < 5; i++) {
-                    var read = stream!.Read(buffer, 0, 4);
-                    await Assert.That(read).IsEquivalentTo(4);
-                }
-                {
-                    var read = stream!.Read(buffer, 0, 4);
-                    await Assert.That(read).IsEquivalentTo(0);
+            byte[] buffer = new byte[40];
+            for (int i = 0; i < 5; i++) {
+                if (splitStream.MoveNextStream()) {
+                    int countRead = 0;
+                    while (true) {
+                        var read = splitStream!.Read(buffer, countRead, 4);
+                        if (read == 0) {
+                            break;
+                        }
+                        countRead += read;
+                    }
+                    {
+                        var read = splitStream.Read(buffer, 0, 4);
+                        await Assert.That(read).IsEquivalentTo(0);
+                        await Assert.That(countRead).IsEquivalentTo(20);
+                        await Assert.That(buffer.Take(20)).IsEquivalentTo(ms.ToArray());
+                    }
+                } else {                    
+                    await Assert.That(i).IsNotEqualTo(0).Because("Calling MoveNextStream() after EOF does not change the stream.");
                 }
             }
-        }
-        {
-            var stream = splitStream.GetStream();
-            await Assert.That(stream).IsNull();
         }
     }
 
@@ -45,57 +50,15 @@ public class SplitStreamTests {
             21, 22, 23, 24, 21, 22, 23, 24, 13, 10,
             31, 32, 33, 34, 31, 32, 33, 34, 13, 10,
             41, 42, 43, 44, 41, 42, 43, 44, 13, 10, });
-        var splitStream = new SplitStream(ms, leaveOpen:true, chunkSize: 4);
-        {
-            byte[] buffer = new byte[400];
-            using (var stream = splitStream.GetStream()) {
-                await Assert.That(stream).IsNotNull();
-                int countRead = 0;
-                while (true) {
-                    var read = stream!.Read(buffer, countRead, countBytesToRead);
-                    if (read == 0) {
-                        break;
-                    } else {
-                        countRead += read;
-                    }
-                }
-                await Assert.That(countRead).IsEquivalentTo(8);
-                await Assert.That(buffer.Take(8)).IsEquivalentTo(new byte[] { 1, 2, 3, 4, 1, 2, 3, 4 });
-                {
-                    var read = stream!.Read(buffer, 0, 4);
-                    await Assert.That(read).IsEquivalentTo(0);
-                }
-            }
-        }
-        {
-            byte[] buffer = new byte[400];
-            using (var stream = splitStream.GetStream()) {
-                await Assert.That(stream).IsNotNull();
-                int countRead = 0;
-                while (true) {
-                    var read = stream!.Read(buffer, countRead, countBytesToRead);
-                    if (read == 0) {
-                        break;
-                    } else {
-                        countRead += read;
-                    }
-                }
-                await Assert.That(countRead).IsEquivalentTo(8);
-                await Assert.That(buffer.Take(8)).IsEquivalentTo(new byte[] { 11, 12, 12, 14, 11, 12, 12, 14, });
+        var splitStream = new SplitStream(ms, leaveOpen: true, chunkSize: 4);
 
-                {
-                    var read = stream!.Read(buffer, 0, 4);
-                    await Assert.That(read).IsEquivalentTo(0);
-                }
-            }
-        }
-        {
-            byte[] buffer = new byte[400];
-            using (var stream = splitStream.GetStream()) {
-                await Assert.That(stream).IsNotNull();
+        byte[] buffer = new byte[400];
+
+        for (int iLine = 0; (iLine < 6); iLine++) {
+            if (splitStream.MoveNextStream()) {
                 int countRead = 0;
                 while (true) {
-                    var read = stream!.Read(buffer, countRead, countBytesToRead);
+                    var read = splitStream!.Read(buffer, countRead, countBytesToRead);
                     if (read == 0) {
                         break;
                     } else {
@@ -103,58 +66,28 @@ public class SplitStreamTests {
                     }
                 }
                 await Assert.That(countRead).IsEquivalentTo(8);
-                await Assert.That(buffer.Take(8)).IsEquivalentTo(new byte[] { 21, 22, 23, 24, 21, 22, 23, 24, });
-                {
-                    var read = stream!.Read(buffer, 0, 4);
+                if (iLine == 0) {
+                    await Assert.That(buffer.Take(8)).IsEquivalentTo(new byte[] { 1, 2, 3, 4, 1, 2, 3, 4 });
+                } else if (iLine == 1) {
+                    await Assert.That(buffer.Take(8)).IsEquivalentTo(new byte[] { 11, 12, 12, 14, 11, 12, 12, 14, });
+                } else if (iLine == 2) {
+                    await Assert.That(buffer.Take(8)).IsEquivalentTo(new byte[] { 21, 22, 23, 24, 21, 22, 23, 24, });
+                } else if (iLine == 3) {
+                    await Assert.That(buffer.Take(8)).IsEquivalentTo(new byte[] { 31, 32, 33, 34, 31, 32, 33, 34, });
+                } else if (iLine == 4) {
+                    await Assert.That(buffer.Take(8)).IsEquivalentTo(new byte[] { 41, 42, 43, 44, 41, 42, 43, 44, });
+                } else {
+                    Assert.Fail("Too many lines.");
+                }
+
+                // no more extra bytes.
+                if ((iLine % 2) == 0) {
+                    var read = splitStream.Read(buffer, 0, 4);
                     await Assert.That(read).IsEquivalentTo(0);
                 }
+            } else {
+                await Assert.That(iLine).IsEqualTo(5).Because("No more lines.");
             }
-        }
-        {
-            byte[] buffer = new byte[400];
-            using (var stream = splitStream.GetStream()) {
-                await Assert.That(stream).IsNotNull();
-                int countRead = 0;
-                while (true) {
-                    var read = stream!.Read(buffer, countRead, countBytesToRead);
-                    if (read == 0) {
-                        break;
-                    } else {
-                        countRead += read;
-                    }
-                }
-                await Assert.That(countRead).IsEquivalentTo(8);
-                await Assert.That(buffer.Take(8)).IsEquivalentTo(new byte[] { 31, 32, 33, 34, 31, 32, 33, 34, });
-                {
-                    var read = stream!.Read(buffer, 0, 4);
-                    await Assert.That(read).IsEquivalentTo(0);
-                }
-            }
-        }
-        {
-            byte[] buffer = new byte[400];
-            using (var stream = splitStream.GetStream()) {
-                await Assert.That(stream).IsNotNull();
-                int countRead = 0;
-                while (true) {
-                    var read = stream!.Read(buffer, countRead, countBytesToRead);
-                    if (read == 0) {
-                        break;
-                    } else {
-                        countRead += read;
-                    }
-                }
-                await Assert.That(countRead).IsEquivalentTo(8);
-                await Assert.That(buffer.Take(8)).IsEquivalentTo(new byte[] { 41, 42, 43, 44, 41, 42, 43, 44, });
-                {
-                    var read = stream!.Read(buffer, 0, 4);
-                    await Assert.That(read).IsEquivalentTo(0);
-                }
-            }
-        }
-        {
-            var stream = splitStream.GetStream();
-            await Assert.That(stream).IsNull();
         }
     }
 
@@ -166,17 +99,14 @@ public class SplitStreamTests {
              1234
             """u8;
         using MemoryStream ms = new(input.ToArray());
-        var splitStream = new SplitStream(ms, leaveOpen:true, chunkSize: 4);
-        for(int i = 0; i < 4; i++) {
-            using (var stream = splitStream.GetStream()) {
-                if (stream == null) {
-                    break;
-                }
+        var splitStream = new SplitStream(ms, leaveOpen: true, chunkSize: 4);
+        for (int i = 0; i < 4; i++) {
+            if (splitStream.MoveNextStream()) {
                 await Assert.That(i).IsLessThan(3);
                 byte[] buffer = new byte[400];
                 int countRead = 0;
                 while (true) {
-                    var read = stream!.Read(buffer, countRead, 400);
+                    var read = splitStream.Read(buffer, countRead, 400);
                     if (read == 0) {
                         break;
                     } else {
@@ -185,6 +115,8 @@ public class SplitStreamTests {
                 }
                 await Assert.That(countRead).IsEquivalentTo(4);
                 await Assert.That(buffer.Take(4)).IsEquivalentTo("1234"u8.ToArray());
+            } else {
+                await Assert.That(i).IsEqualTo(3).Because("No more lines.");
             }
         }
     }

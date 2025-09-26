@@ -88,15 +88,16 @@ public class JsonLinesSerializerTests {
             using (var splitStream = new Brimborium.JSONLines.SplitStream(stream, leaveOpen: true)) {
                 byte[] hack = new byte[100];
                 while (true) {
-                    using (var splittedStream = splitStream.GetStream()) {
-                        if (splittedStream is null) { break; }
+                    if (splitStream.MoveNextStream()) {
                         var readsize = 0;
                         while (true) {
-                            var r = splittedStream.Read(hack, 0, hack.Length);
+                            var r = splitStream.Read(hack, 0, hack.Length);
                             if (r <= 0) { break; }
                             readsize += r;
                         }
                         await Assert.That(readsize).IsGreaterThanOrEqualTo(22).And.IsLessThanOrEqualTo(22 + 6);
+                    } else {
+                        break;
                     }
                 }
             }
@@ -136,15 +137,16 @@ public class JsonLinesSerializerTests {
             using (var splitStream = new Brimborium.JSONLines.SplitStream(stream, leaveOpen: true)) {
                 byte[] hack = new byte[100];
                 while (true) {
-                    using (var splittedStream = splitStream.GetStream()) {
-                        if (splittedStream is null) { break; }
+                    if (splitStream.MoveNextStream()) {
                         var readsize = 0;
                         while (true) {
-                            var r = splittedStream.Read(hack, 0, hack.Length);
+                            var r = splitStream.Read(hack, 0, hack.Length);
                             if (r <= 0) { break; }
                             readsize += r;
                         }
                         await Assert.That(readsize).IsGreaterThanOrEqualTo(22).And.IsLessThanOrEqualTo(22 + 6);
+                    } else {
+                        break;
                     }
                 }
             }
