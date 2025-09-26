@@ -1,0 +1,11 @@
+<Project>
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageVersion Include="System.Text.Json" Version="9.0.9" />
+    <PackageVersion Include="TUnit" Version="0.61.39" />
+    <PackageVersion Include="Verify" Version="30.19.0" />
+    <PackageVersion Include="Verify.TUnit" Version="30.19.0" />
+  </ItemGroup>
+</Project>
